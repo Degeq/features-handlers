@@ -1,15 +1,15 @@
 package ru.netology;
+import org.apache.http.client.utils.URLEncodedUtils;
+
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.LocalDateTime;
-import java.util.HashMap;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class Server {
 
@@ -35,19 +35,36 @@ public class Server {
 
     private void requestProcessing(Socket socket) {
         try (
-                final var in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                final var in = new BufferedInputStream(socket.getInputStream());
                 final var out = new BufferedOutputStream(socket.getOutputStream());
         )  {
+            final var limit = 4096;
 
-            final var requestLine = in.readLine();
-            final var parts = requestLine.split(" ");
+            in.mark(limit);
+            final var buffer = new byte[limit];
+            final var read = in.read(buffer);
 
-            if (parts.length != 3) {
-                // just close socket
+            // ищем request line
+            final var requestLineDelimiter = new byte[]{'\r', '\n'};
+            final var requestLineEnd = indexOf(buffer, requestLineDelimiter, 0, read);
+            if (requestLineEnd == -1) {
+                printNotFoundError(out);
                 return;
             }
 
-            var request = new Request(parts[0], parts[1], parts[2]);
+            // читаем request line
+            final var requestLine = new String(Arrays.copyOf(buffer, requestLineEnd)).split(" ");
+            if (requestLine.length != 3) {
+                printNotFoundError(out);
+                return;
+            }
+
+            var position = requestLine[1].indexOf('?');
+
+            var request = new Request(requestLine[0], requestLine[1].substring(0, position),
+                    requestLine[1].substring(position+1), requestLine[2]);
+
+            System.out.println(request.getRequestBody());
 
             if (!handlers.containsKey(request.getRequestMethod())) {
                 printNotFoundError(out);
@@ -63,53 +80,27 @@ public class Server {
 
             var handler = method.get(request.getRequestPath());
 
-            handler.handle(request, out);
+            final var headersDelimiter = new byte[]{'\r', '\n', '\r', '\n'};
+            final var headersStart = requestLineEnd + requestLineDelimiter.length;
+            final var headersEnd = indexOf(buffer, headersDelimiter, headersStart, read);
+
+            if (headersEnd == -1) {
+                printNotFoundError(out);
+            }
+
+            in.reset();
+            in.skip(headersStart);
+
+            final var headersBytes = in.readNBytes(headersEnd - headersStart);
+            final var headers = Arrays.asList(new String(headersBytes).split("\r\n"));
+            request.setHeadersList(headers);
+            System.out.println(headers);
+
+            in.skip(headersDelimiter.length);
+
+            handler.handle(request, out, in);
             return;
 
-//            final var path = parts[1];
-//            if (!validPaths.contains(path)) {
-//                out.write((
-//                        "HTTP/1.1 404 Not Found\r\n" +
-//                                "Content-Length: 0\r\n" +
-//                                "Connection: close\r\n" +
-//                                "\r\n"
-//                ).getBytes());
-//                out.flush();
-//                return;
-//            }
-//
-//            final var filePath = Path.of(".", "/public", path);
-//            final var mimeType = Files.probeContentType(filePath);
-//
-//            if (path.equals("/classic.html")) {
-//                final var template = Files.readString(filePath);
-//                final var content = template.replace(
-//                        "{time}",
-//                        LocalDateTime.now().toString()
-//                ).getBytes();
-//                out.write((
-//                        "HTTP/1.1 200 OK\r\n" +
-//                                "Content-Type: " + mimeType + "\r\n" +
-//                                "Content-Length: " + content.length + "\r\n" +
-//                                "Connection: close\r\n" +
-//                                "\r\n"
-//                ).getBytes());
-//                out.write(content);
-//                out.flush();
-//                return;
-//            }
-//
-//            final var length = Files.size(filePath);
-//            out.write((
-//                    "HTTP/1.1 200 OK\r\n" +
-//                            "Content-Type: " + mimeType + "\r\n" +
-//                            "Content-Length: " + length + "\r\n" +
-//                            "Connection: close\r\n" +
-//                            "\r\n"
-//            ).getBytes());
-//            Files.copy(filePath, out);
-//            out.flush();
-//            return;
         } catch (IOException ioe) {
             ioe.printStackTrace();
         }
@@ -134,5 +125,17 @@ public class Server {
         }
     }
 
+    private static int indexOf(byte[] array, byte[] target, int start, int max) {
+        outer:
+        for (int i = start; i < max - target.length + 1; i++) {
+            for (int j = 0; j < target.length; j++) {
+                if (array[i + j] != target[j]) {
+                    continue outer;
+                }
+            }
+            return i;
+        }
+        return -1;
+    }
 
 }
